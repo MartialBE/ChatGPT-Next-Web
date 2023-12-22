@@ -1,12 +1,15 @@
 import { StructuredTool } from "langchain/tools";
 import { z } from "zod";
-import S3FileStorage from "../../utils/r2_file_storage";
+import S3FileStorage from "../../utils/s3_file_storage";
 
 export class DallEAPIWrapper extends StructuredTool {
   name = "dalle_image_generator";
   n = 1;
   apiKey: string;
   baseURL?: string;
+  model: string;
+
+  noStorage: boolean;
 
   callback?: (data: string) => Promise<void>;
 
@@ -22,6 +25,9 @@ export class DallEAPIWrapper extends StructuredTool {
     this.apiKey = apiKey;
     this.baseURL = baseURL;
     this.callback = callback;
+
+    this.noStorage = !!process.env.DALLE_NO_IMAGE_STORAGE;
+    this.model = process.env.DALLE_MODEL ?? "dall-e-3";
   }
 
   async saveImageFromUrl(url: string) {
@@ -45,7 +51,7 @@ export class DallEAPIWrapper extends StructuredTool {
 
   /** @ignore */
   async _call({ prompt, size }: z.infer<typeof this.schema>) {
-    let image_url;
+    let imageUrl;
     const apiUrl = `${this.baseURL}/images/generations`;
     try {
       const requestOptions = {
@@ -55,30 +61,40 @@ export class DallEAPIWrapper extends StructuredTool {
           Authorization: `Bearer ${this.apiKey}`,
         },
         body: JSON.stringify({
-          model: "dall-e-3",
+          model: this.model,
           prompt: prompt,
           n: this.n,
           size: size,
         }),
       };
+      console.log(requestOptions);
       const response = await fetch(apiUrl, requestOptions);
       const json = await response.json();
-      console.log("[DALL-E]", json);
-      image_url = json.data[0].url;
+      try {
+        console.log("[DALL-E]", json);
+        imageUrl = json.data[0].url;
+      } catch (e) {
+        if (this.callback != null) await this.callback(JSON.stringify(json));
+        throw e;
+      }
     } catch (e) {
       console.error("[DALL-E]", e);
+      return (e as Error).message;
     }
-    if (!image_url) return "No image was generated";
+    if (!imageUrl) return "No image was generated";
     try {
-      let filePath = await this.saveImageFromUrl(image_url);
+      let filePath = imageUrl;
+      if (!this.noStorage) {
+        filePath = await this.saveImageFromUrl(imageUrl);
+      }
       console.log("[DALL-E]", filePath);
       var imageMarkdown = `![img](${filePath})`;
       if (this.callback != null) await this.callback(imageMarkdown);
       return imageMarkdown;
     } catch (e) {
       if (this.callback != null)
-        await this.callback("Image upload to R2 storage failed");
-      return "Image upload to R2 storage failed";
+        await this.callback("Image upload to OSS failed");
+      return "Image upload to OSS failed";
     }
   }
 

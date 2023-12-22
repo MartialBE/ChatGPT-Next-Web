@@ -2,6 +2,7 @@ import {
   ApiPath,
   DEFAULT_API_HOST,
   DEFAULT_MODELS,
+  GooglePath,
   OpenaiPath,
   REQUEST_TIMEOUT_MS,
   ServiceProvider,
@@ -11,6 +12,7 @@ import { useAccessStore, useAppConfig, useChatStore } from "@/app/store";
 import {
   AgentChatOptions,
   ChatOptions,
+  getGeminiHeaders,
   getHeaders,
   LLMApi,
   LLMModel,
@@ -22,9 +24,6 @@ import {
   fetchEventSource,
 } from "@fortaine/fetch-event-source";
 import { prettyObject } from "@/app/utils/format";
-import { getClientConfig } from "@/app/config/client";
-import { makeAzurePath } from "@/app/azure";
-import axios from "axios";
 
 export interface OpenAIListModelResponse {
   object: string;
@@ -35,37 +34,27 @@ export interface OpenAIListModelResponse {
   }>;
 }
 
-export class ChatGPTApi implements LLMApi {
+export class GeminiApi implements LLMApi {
   private disableListModels = true;
 
   path(path: string): string {
     const accessStore = useAccessStore.getState();
+    let baseUrl = ApiPath.GoogleAI;
+    // if (baseUrl.length === 0) {
+    //   const isApp = !!getClientConfig()?.isApp;
+    //   baseUrl = isApp ? DEFAULT_API_HOST : ApiPath.OpenAI;
+    // }
 
-    const isAzure = accessStore.provider === ServiceProvider.Azure;
+    // if (baseUrl.endsWith("/")) {
+    //   baseUrl = baseUrl.slice(0, baseUrl.length - 1);
+    // }
+    // if (!baseUrl.startsWith("http") && !baseUrl.startsWith(ApiPath.OpenAI)) {
+    //   baseUrl = "https://" + baseUrl;
+    // }
 
-    if (isAzure && !accessStore.isValidAzure()) {
-      throw Error(
-        "incomplete azure config, please check it in your settings page",
-      );
-    }
-
-    let baseUrl = isAzure ? accessStore.azureUrl : accessStore.openaiUrl;
-
-    if (baseUrl.length === 0) {
-      const isApp = !!getClientConfig()?.isApp;
-      baseUrl = isApp ? DEFAULT_API_HOST : ApiPath.OpenAI;
-    }
-
-    if (baseUrl.endsWith("/")) {
-      baseUrl = baseUrl.slice(0, baseUrl.length - 1);
-    }
-    if (!baseUrl.startsWith("http") && !baseUrl.startsWith(ApiPath.OpenAI)) {
-      baseUrl = "https://" + baseUrl;
-    }
-
-    if (isAzure) {
-      path = makeAzurePath(path, accessStore.azureApiVersion);
-    }
+    // if (isAzure) {
+    //   path = makeAzurePath(path, accessStore.azureApiVersion);
+    // }
 
     return [baseUrl, path].join("/");
   }
@@ -76,72 +65,56 @@ export class ChatGPTApi implements LLMApi {
 
   async chat(options: ChatOptions) {
     const messages: any[] = [];
-
-    const getImageBase64Data = async (url: string) => {
-      const response = await axios.get(url, { responseType: "arraybuffer" });
-      const base64 = Buffer.from(response.data, "binary").toString("base64");
-      return base64;
-    };
+    console.log(options.messages);
+    let systemPrompt = "";
     for (const v of options.messages) {
+      if (v.role === "system") {
+        // systemPrompt = v.content;
+        continue;
+      }
+      let content = v.content;
+      if (systemPrompt !== "") {
+        content = `${systemPrompt}\n${content}`;
+        systemPrompt = "";
+      }
       let message: {
         role: string;
-        content: { type: string; text?: string; image_url?: { url: string } }[];
+        parts: { text: string }[];
       } = {
-        role: v.role,
-        content: [],
+        role: v.role === "assistant" ? "model" : "user",
+        parts: [],
       };
-      message.content.push({
-        type: "text",
-        text: v.content,
+      message.parts.push({
+        text: content,
       });
-      if (v.image_url) {
-        var base64Data = await getImageBase64Data(v.image_url);
-        message.content.push({
-          type: "image_url",
-          image_url: {
-            url: `data:image/jpeg;base64,${base64Data}`,
-          },
-        });
-      }
       messages.push(message);
     }
 
-    const modelConfig = {
-      ...useAppConfig.getState().modelConfig,
-      ...useChatStore.getState().currentSession().mask.modelConfig,
-      ...{
-        model: options.config.model,
+    const requestPayload = {
+      contents: messages,
+      generationConfig: {
+        temperature: 1.0,
+        maxOutputTokens: 8000,
+        topP: 0.8,
+        topK: 10,
       },
     };
-    const requestPayload = {
-      messages,
-      stream: options.config.stream,
-      model: modelConfig.model,
-      temperature: modelConfig.temperature,
-      presence_penalty: modelConfig.presence_penalty,
-      frequency_penalty: modelConfig.frequency_penalty,
-      top_p: modelConfig.top_p,
-      max_tokens:
-        modelConfig.model == "gpt-4-vision-preview"
-          ? modelConfig.max_tokens
-          : null,
-      // max_tokens: Math.max(modelConfig.max_tokens, 1024),
-      // Please do not ask me why not send max_tokens, no reason, this param is just shit, I dont want to explain anymore.
-    };
 
-    console.log("[Request] openai payload: ", requestPayload);
+    console.log("[Request] gemini payload: ", requestPayload);
 
-    const shouldStream = !!options.config.stream;
+    const shouldStream = true;
     const controller = new AbortController();
     options.onController?.(controller);
 
     try {
-      const chatPath = this.path(OpenaiPath.ChatPath);
+      const chatPath = this.path(
+        GooglePath.ChatPath.replace("{{model}}", options.config.model),
+      );
       const chatPayload = {
         method: "POST",
         body: JSON.stringify(requestPayload),
         signal: controller.signal,
-        headers: getHeaders(),
+        headers: getGeminiHeaders(),
       };
 
       // make a fetch request
@@ -191,7 +164,7 @@ export class ChatGPTApi implements LLMApi {
             clearTimeout(requestTimeoutId);
             const contentType = res.headers.get("content-type");
             console.log(
-              "[OpenAI] request response content type: ",
+              "[Google] request response content type: ",
               contentType,
             );
 
@@ -234,13 +207,15 @@ export class ChatGPTApi implements LLMApi {
             const text = msg.data;
             try {
               const json = JSON.parse(text) as {
-                choices: Array<{
-                  delta: {
-                    content: string;
+                candidates: Array<{
+                  content: {
+                    parts: Array<{
+                      text: string;
+                    }>;
                   };
                 }>;
               };
-              const delta = json.choices[0]?.delta?.content;
+              const delta = json.candidates[0]?.content?.parts[0]?.text;
               if (delta) {
                 remainText += delta;
               }

@@ -11,6 +11,7 @@ export const RUNTIME_CONFIG_DOM = "danger-runtime-config";
 export const DEFAULT_CORS_HOST = "https://a.nextweb.fun";
 export const DEFAULT_API_HOST = `${DEFAULT_CORS_HOST}/api/proxy`;
 export const OPENAI_BASE_URL = "https://api.openai.com";
+export const GOOGLE_BASE_URL = "https://generativelanguage.googleapis.com";
 
 export enum Path {
   Home = "/",
@@ -25,6 +26,7 @@ export enum Path {
 export enum ApiPath {
   Cors = "/api/cors",
   OpenAI = "/api/openai",
+  GoogleAI = "/api/google",
 }
 
 export enum SlotID {
@@ -57,6 +59,7 @@ export const NARROW_SIDEBAR_WIDTH = 100;
 export const ACCESS_CODE_PREFIX = "nk-";
 
 export const LAST_INPUT_KEY = "last-input";
+export const LAST_INPUT_IMAGE_KEY = "last-input-image";
 export const UNFINISHED_INPUT = (id: string) => "unfinished-input-" + id;
 
 export const STORAGE_KEY = "chatgpt-next-web";
@@ -74,6 +77,11 @@ export const OpenaiPath = {
   ChatPath: "v1/chat/completions",
   UsagePath: "dashboard/billing/usage",
   SubsPath: "dashboard/billing/subscription",
+  ListModelPath: "v1/models",
+};
+
+export const GooglePath = {
+  ChatPath: "v1/models/{{model}}:streamGenerateContent",
   ListModelPath: "v1/models",
 };
 

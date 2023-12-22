@@ -2,6 +2,8 @@ import { getClientConfig } from "../config/client";
 import { ACCESS_CODE_PREFIX, Azure, ServiceProvider } from "../constant";
 import { ChatMessage, ModelType, useAccessStore } from "../store";
 import { ChatGPTApi } from "./platforms/openai";
+import { GeminiApi } from "./platforms/google";
+import { FileApi } from "./platforms/utils";
 
 export const ROLES = ["system", "user", "assistant"] as const;
 export type MessageRole = (typeof ROLES)[number];
@@ -12,6 +14,7 @@ export type ChatModel = ModelType;
 export interface RequestMessage {
   role: MessageRole;
   content: string;
+  image_url?: string;
 }
 
 export interface LLMConfig {
@@ -96,9 +99,16 @@ export abstract class ToolApi {
 
 export class ClientApi {
   public llm: LLMApi;
+  public file: FileApi;
 
   constructor() {
     this.llm = new ChatGPTApi();
+    this.file = new FileApi();
+  }
+
+  switch(model: string) {
+    if (model.startsWith("gemini")) this.llm = new GeminiApi();
+    else this.llm = new ChatGPTApi();
   }
 
   config() {}
@@ -149,6 +159,32 @@ export class ClientApi {
 
 export const api = new ClientApi();
 
+export function getAuthHeaders() {
+  const accessStore = useAccessStore.getState();
+  const headers: Record<string, string> = {};
+
+  const isAzure = accessStore.provider === ServiceProvider.Azure;
+  const authHeader = isAzure ? "api-key" : "Authorization";
+  const apiKey = isAzure ? accessStore.azureApiKey : accessStore.openaiApiKey;
+
+  const makeBearer = (s: string) => `${isAzure ? "" : "Bearer "}${s.trim()}`;
+  const validString = (x: string) => x && x.length > 0;
+
+  // use user's api key first
+  if (validString(apiKey)) {
+    headers[authHeader] = makeBearer(apiKey);
+  } else if (
+    accessStore.enabledAccessControl() &&
+    validString(accessStore.accessCode)
+  ) {
+    headers[authHeader] = makeBearer(
+      ACCESS_CODE_PREFIX + accessStore.accessCode,
+    );
+  }
+
+  return headers;
+}
+
 export function getHeaders() {
   const accessStore = useAccessStore.getState();
   const headers: Record<string, string> = {
@@ -161,6 +197,34 @@ export function getHeaders() {
   const apiKey = isAzure ? accessStore.azureApiKey : accessStore.openaiApiKey;
 
   const makeBearer = (s: string) => `${isAzure ? "" : "Bearer "}${s.trim()}`;
+  const validString = (x: string) => x && x.length > 0;
+
+  // use user's api key first
+  if (validString(apiKey)) {
+    headers[authHeader] = makeBearer(apiKey);
+  } else if (
+    accessStore.enabledAccessControl() &&
+    validString(accessStore.accessCode)
+  ) {
+    headers[authHeader] = makeBearer(
+      ACCESS_CODE_PREFIX + accessStore.accessCode,
+    );
+  }
+
+  return headers;
+}
+
+export function getGeminiHeaders() {
+  const accessStore = useAccessStore.getState();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "x-requested-with": "XMLHttpRequest",
+  };
+
+  const authHeader = "Authorization";
+  const apiKey = accessStore.googleApiKey;
+
+  const makeBearer = (s: string) => `${"Bearer "}${s.trim()}`;
   const validString = (x: string) => x && x.length > 0;
 
   // use user's api key first

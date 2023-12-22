@@ -62,15 +62,26 @@ export const getServerSideConfig = () => {
 
   const isAzure = !!process.env.AZURE_URL;
 
+  const apiKeyEnvVar = process.env.OPENAI_API_KEY ?? "";
+  const apiKeys = apiKeyEnvVar.split(",").map((v) => v.trim());
+  const randomIndex = Math.floor(Math.random() * apiKeys.length);
+  const apiKey = apiKeys[randomIndex];
+  console.log(
+    `[Server Config] using ${randomIndex + 1} of ${apiKeys.length} api key`,
+  );
+
   return {
     baseUrl: process.env.BASE_URL,
-    apiKey: process.env.OPENAI_API_KEY,
+    apiKey,
     openaiOrgId: process.env.OPENAI_ORG_ID,
 
     isAzure,
     azureUrl: process.env.AZURE_URL,
     azureApiKey: process.env.AZURE_API_KEY,
     azureApiVersion: process.env.AZURE_API_VERSION,
+
+    googleApiKey: process.env.GOOGLE_API_KEY ?? "",
+    googleBaseUrl: process.env.GOOGLE_BASE_URL,
 
     needCode: ACCESS_CODES.size > 0,
     code: process.env.CODE,

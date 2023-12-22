@@ -1,3 +1,4 @@
+import Image from "next/image";
 import EmojiPicker, {
   Emoji,
   EmojiStyle,
@@ -10,7 +11,7 @@ import BotIcon from "../icons/bot.svg";
 import BlackBotIcon from "../icons/black-bot.svg";
 
 export function getEmojiUrl(unified: string, style: EmojiStyle) {
-  return `https://cdn.staticfile.org/emoji-datasource-apple/14.0.0/img/${style}/64/${unified}.png`;
+  return `https://cdnjs.cloudflare.com/ajax/libs/emoji-datasource-apple/15.0.1/img/${style}/64/${unified}.png`;
 }
 
 export function AvatarPicker(props: {
@@ -29,6 +30,19 @@ export function AvatarPicker(props: {
 }
 
 export function Avatar(props: { model?: ModelType; avatar?: string }) {
+  if (props.model?.startsWith("gemini")) {
+    return (
+      <div className="no-dark">
+        <Image
+          src="/gemini-bot.gif"
+          alt="Gemini Bot Icon"
+          width={30}
+          height={30}
+          className="user-avatar"
+        />
+      </div>
+    );
+  }
   if (props.model) {
     return (
       <div className="no-dark">
