@@ -10,7 +10,7 @@ import { GoogleSearch } from "@/app/api/langchain-tools/google_search";
 import { Tool, DynamicTool } from "langchain/tools";
 import * as langchainTools from "langchain/tools";
 import { Embeddings } from "langchain/dist/embeddings/base.js";
-import { promises } from "dns";
+import { WolframAlphaTool } from "./wolframalpha";
 
 export class EdgeTool {
   private apiKey: string | undefined;
@@ -38,37 +38,6 @@ export class EdgeTool {
   }
 
   async getCustomTools(): Promise<any[]> {
-    // let searchTool: Tool = new DuckDuckGo();
-    // if (process.env.CHOOSE_SEARCH_ENGINE) {
-    //     switch (process.env.CHOOSE_SEARCH_ENGINE) {
-    //         case "google":
-    //             searchTool = new GoogleSearch();
-    //             break;
-    //         case "baidu":
-    //             searchTool = new BaiduSearch();
-    //             break;
-    //     }
-    // }
-    // if (process.env.BING_SEARCH_API_KEY) {
-    //     let bingSearchTool = new langchainTools["BingSerpAPI"](
-    //         process.env.BING_SEARCH_API_KEY,
-    //     );
-    //     searchTool = new DynamicTool({
-    //         name: "bing_search",
-    //         description: bingSearchTool.description,
-    //         func: async (input: string) => bingSearchTool.call(input),
-    //     });
-    // }
-    // if (process.env.SERPAPI_API_KEY) {
-    //     let serpAPITool = new langchainTools["SerpAPI"](
-    //         process.env.SERPAPI_API_KEY,
-    //     );
-    //     searchTool = new DynamicTool({
-    //         name: "google_search",
-    //         description: serpAPITool.description,
-    //         func: async (input: string) => serpAPITool.call(input),
-    //     });
-    // }
     const webBrowserTool = new WebBrowser({
       model: this.model,
       embeddings: this.embeddings,
@@ -79,16 +48,18 @@ export class EdgeTool {
       this.baseUrl,
       this.callback,
     );
-    dallEAPITool.returnDirect = true;
     const stableDiffusionTool = new StableDiffusionWrapper();
     const arxivAPITool = new ArxivAPIWrapper();
-    return [
+    const wolframAlphaTool = new WolframAlphaTool();
+    let tools = [
       // searchTool,
       calculatorTool,
       webBrowserTool,
       dallEAPITool,
       stableDiffusionTool,
       arxivAPITool,
+      wolframAlphaTool,
     ];
+    return tools;
   }
 }

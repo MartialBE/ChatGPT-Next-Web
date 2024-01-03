@@ -7,8 +7,11 @@ import { BaseCallbackHandler } from "langchain/callbacks";
 
 import { AIMessage, HumanMessage, SystemMessage } from "langchain/schema";
 import { BufferMemory, ChatMessageHistory } from "langchain/memory";
-import { initializeAgentExecutorWithOptions } from "langchain/agents";
-import { ACCESS_CODE_PREFIX } from "@/app/constant";
+import {
+  AgentExecutor,
+  initializeAgentExecutorWithOptions,
+} from "langchain/agents";
+import { ACCESS_CODE_PREFIX, ServiceProvider } from "@/app/constant";
 
 import * as langchainTools from "langchain/tools";
 import { HttpGetTool } from "@/app/api/langchain-tools/http_get";
@@ -16,6 +19,15 @@ import { DuckDuckGo } from "@/app/api/langchain-tools/duckduckgo_search";
 import { DynamicTool, Tool } from "langchain/tools";
 import { BaiduSearch } from "@/app/api/langchain-tools/baidu_search";
 import { GoogleSearch } from "@/app/api/langchain-tools/google_search";
+import { useAccessStore } from "@/app/store";
+import { DynamicStructuredTool, formatToOpenAITool } from "langchain/tools";
+import { formatToOpenAIToolMessages } from "langchain/agents/format_scratchpad/openai_tools";
+import {
+  OpenAIToolsAgentOutputParser,
+  type ToolsAgentStep,
+} from "langchain/agents/openai/output_parser";
+import { RunnableSequence } from "langchain/schema/runnable";
+import { ChatPromptTemplate, MessagesPlaceholder } from "langchain/prompts";
 
 export interface RequestMessage {
   role: string;
@@ -24,6 +36,8 @@ export interface RequestMessage {
 
 export interface RequestBody {
   messages: RequestMessage[];
+  isAzure: boolean;
+  azureApiVersion?: string;
   model: string;
   stream?: boolean;
   temperature: number;
@@ -89,9 +103,9 @@ export class AgentApi {
         await writer.close();
       },
       async handleChainEnd(outputs, runId, parentRunId, tags) {
-        console.log("[handleChainEnd]");
-        await writer.ready;
-        await writer.close();
+        // console.log("[handleChainEnd]");
+        // await writer.ready;
+        // await writer.close();
       },
       async handleLLMEnd() {
         // await writer.ready;
@@ -108,15 +122,15 @@ export class AgentApi {
         );
         await writer.close();
       },
-      handleLLMStart(llm, _prompts: string[]) {
+      async handleLLMStart(llm, _prompts: string[]) {
         // console.log("handleLLMStart: I'm the second handler!!", { llm });
       },
-      handleChainStart(chain) {
+      async handleChainStart(chain) {
         // console.log("handleChainStart: I'm the second handler!!", { chain });
       },
       async handleAgentAction(action) {
         try {
-          // console.log("[handleAgentAction]", action.tool);
+          // console.log("[handleAgentAction]", { action });
           if (!reqBody.returnIntermediateSteps) return;
           var response = new ResponseBody();
           response.isToolMessage = true;
@@ -138,24 +152,26 @@ export class AgentApi {
           await writer.close();
         }
       },
-      handleToolStart(tool, input) {
-        // console.log("[handleToolStart]", { tool });
+      async handleToolStart(tool, input) {
+        // console.log("[handleToolStart]", { tool, input });
       },
       async handleToolEnd(output, runId, parentRunId, tags) {
         // console.log("[handleToolEnd]", { output, runId, parentRunId, tags });
       },
-      handleAgentEnd(action, runId, parentRunId, tags) {
-        // console.log("[handleAgentEnd]");
+      async handleAgentEnd(action, runId, parentRunId, tags) {
+        console.log("[handleAgentEnd]");
+        await writer.ready;
+        await writer.close();
       },
     });
   }
 
   async getOpenAIApiKey(token: string) {
     const serverConfig = getServerSideConfig();
-    const isOpenAiKey = !token.startsWith(ACCESS_CODE_PREFIX);
+    const isApiKey = !token.startsWith(ACCESS_CODE_PREFIX);
 
     let apiKey = serverConfig.apiKey;
-    if (isOpenAiKey && token) {
+    if (isApiKey && token) {
       apiKey = token;
     }
     return apiKey;
@@ -179,27 +195,31 @@ export class AgentApi {
     customTools: any[],
   ) {
     try {
+      let useTools = reqBody.useTools ?? [];
       const serverConfig = getServerSideConfig();
 
       // const reqBody: RequestBody = await req.json();
-      const authToken = req.headers.get("Authorization") ?? "";
+      const isAzure = reqBody.isAzure || serverConfig.isAzure;
+      const authHeaderName = isAzure ? "api-key" : "Authorization";
+      const authToken = req.headers.get(authHeaderName) ?? "";
       const token = authToken.trim().replaceAll("Bearer ", "").trim();
-      const isOpenAiKey = !token.startsWith(ACCESS_CODE_PREFIX);
-      let useTools = reqBody.useTools ?? [];
-      let apiKey = serverConfig.apiKey;
-      if (isOpenAiKey && token) {
-        apiKey = token;
-      }
 
+      let apiKey = await this.getOpenAIApiKey(token);
+      if (isAzure) apiKey = token;
       let baseUrl = "https://api.openai.com/v1";
       if (serverConfig.baseUrl) baseUrl = serverConfig.baseUrl;
       if (
         reqBody.baseUrl?.startsWith("http://") ||
         reqBody.baseUrl?.startsWith("https://")
-      )
+      ) {
         baseUrl = reqBody.baseUrl;
-      if (!baseUrl.endsWith("/v1"))
+      }
+      if (!isAzure && !baseUrl.endsWith("/v1")) {
         baseUrl = baseUrl.endsWith("/") ? `${baseUrl}v1` : `${baseUrl}/v1`;
+      }
+      if (!reqBody.isAzure && serverConfig.isAzure) {
+        baseUrl = serverConfig.azureUrl || baseUrl;
+      }
       console.log("[baseUrl]", baseUrl);
 
       var handler = await this.getHandler(reqBody);
@@ -233,6 +253,14 @@ export class AgentApi {
           name: "google_search",
           description: serpAPITool.description,
           func: async (input: string) => serpAPITool.call(input),
+        });
+      }
+      if (process.env.GOOGLE_CSE_ID && process.env.GOOGLE_API_KEY) {
+        let googleCustomSearchTool = new langchainTools["GoogleCustomSearch"]();
+        searchTool = new DynamicTool({
+          name: "google_custom_search",
+          description: googleCustomSearchTool.description,
+          func: async (input: string) => googleCustomSearchTool.call(input),
         });
       }
 
@@ -273,15 +301,15 @@ export class AgentApi {
             pastMessages.push(new AIMessage(message.content));
         });
 
-      const memory = new BufferMemory({
-        memoryKey: "chat_history",
-        returnMessages: true,
-        inputKey: "input",
-        outputKey: "output",
-        chatHistory: new ChatMessageHistory(pastMessages),
-      });
+      // const memory = new BufferMemory({
+      //   memoryKey: "chat_history",
+      //   returnMessages: true,
+      //   inputKey: "input",
+      //   outputKey: "output",
+      //   chatHistory: new ChatMessageHistory(pastMessages),
+      // });
 
-      const llm = new ChatOpenAI(
+      let llm = new ChatOpenAI(
         {
           modelName: reqBody.model,
           openAIApiKey: apiKey,
@@ -293,12 +321,64 @@ export class AgentApi {
         },
         { basePath: baseUrl },
       );
-      const executor = await initializeAgentExecutorWithOptions(tools, llm, {
-        agentType: "openai-functions",
-        returnIntermediateSteps: reqBody.returnIntermediateSteps,
-        maxIterations: reqBody.maxIterations,
-        memory: memory,
+
+      if (reqBody.isAzure || serverConfig.isAzure) {
+        llm = new ChatOpenAI({
+          temperature: reqBody.temperature,
+          streaming: reqBody.stream,
+          topP: reqBody.top_p,
+          presencePenalty: reqBody.presence_penalty,
+          frequencyPenalty: reqBody.frequency_penalty,
+          azureOpenAIApiKey: apiKey,
+          azureOpenAIApiVersion: reqBody.isAzure
+            ? reqBody.azureApiVersion
+            : serverConfig.azureApiVersion,
+          azureOpenAIApiDeploymentName: reqBody.model,
+          azureOpenAIBasePath: baseUrl,
+        });
+      }
+      const memory = new BufferMemory({
+        memoryKey: "history",
+        inputKey: "question",
+        outputKey: "answer",
+        returnMessages: true,
+        chatHistory: new ChatMessageHistory(pastMessages),
       });
+      const prompt = ChatPromptTemplate.fromMessages([
+        new MessagesPlaceholder("chat_history"),
+        ["human", "{input}"],
+        new MessagesPlaceholder("agent_scratchpad"),
+      ]);
+      const modelWithTools = llm.bind({ tools: tools.map(formatToOpenAITool) });
+      const runnableAgent = RunnableSequence.from([
+        {
+          input: (i: { input: string; steps: ToolsAgentStep[] }) => i.input,
+          agent_scratchpad: (i: { input: string; steps: ToolsAgentStep[] }) =>
+            formatToOpenAIToolMessages(i.steps),
+          chat_history: async (_: {
+            input: string;
+            steps: ToolsAgentStep[];
+          }) => {
+            const { history } = await memory.loadMemoryVariables({});
+            return history;
+          },
+        },
+        prompt,
+        modelWithTools,
+        new OpenAIToolsAgentOutputParser(),
+      ]).withConfig({ runName: "OpenAIToolsAgent" });
+
+      const executor = AgentExecutor.fromAgentAndTools({
+        agent: runnableAgent,
+        tools,
+      });
+
+      // const executor = await initializeAgentExecutorWithOptions(tools, llm, {
+      //   agentType: "openai-functions",
+      //   returnIntermediateSteps: reqBody.returnIntermediateSteps,
+      //   maxIterations: reqBody.maxIterations,
+      //   memory: memory,
+      // });
 
       executor.call(
         {
@@ -307,7 +387,6 @@ export class AgentApi {
         [handler],
       );
 
-      console.log("returning response");
       return new Response(this.transformStream.readable, {
         headers: { "Content-Type": "text/event-stream" },
       });

@@ -1,120 +1,111 @@
 import {
   ApiPath,
-  DEFAULT_API_HOST,
-  DEFAULT_MODELS,
-  GooglePath,
-  OpenaiPath,
+  Google,
   REQUEST_TIMEOUT_MS,
   ServiceProvider,
 } from "@/app/constant";
-import { useAccessStore, useAppConfig, useChatStore } from "@/app/store";
-
 import {
   AgentChatOptions,
   ChatOptions,
-  getGeminiHeaders,
   getHeaders,
   LLMApi,
   LLMModel,
   LLMUsage,
 } from "../api";
-import Locale from "../../locales";
+import { useAccessStore, useAppConfig, useChatStore } from "@/app/store";
 import {
   EventStreamContentType,
   fetchEventSource,
 } from "@fortaine/fetch-event-source";
 import { prettyObject } from "@/app/utils/format";
-
-export interface OpenAIListModelResponse {
-  object: string;
-  data: Array<{
-    id: string;
-    object: string;
-    root: string;
-  }>;
-}
-
-export class GeminiApi implements LLMApi {
-  private disableListModels = true;
-
-  path(path: string): string {
-    const accessStore = useAccessStore.getState();
-    let baseUrl = ApiPath.GoogleAI;
-    // if (baseUrl.length === 0) {
-    //   const isApp = !!getClientConfig()?.isApp;
-    //   baseUrl = isApp ? DEFAULT_API_HOST : ApiPath.OpenAI;
-    // }
-
-    // if (baseUrl.endsWith("/")) {
-    //   baseUrl = baseUrl.slice(0, baseUrl.length - 1);
-    // }
-    // if (!baseUrl.startsWith("http") && !baseUrl.startsWith(ApiPath.OpenAI)) {
-    //   baseUrl = "https://" + baseUrl;
-    // }
-
-    // if (isAzure) {
-    //   path = makeAzurePath(path, accessStore.azureApiVersion);
-    // }
-
-    return [baseUrl, path].join("/");
+import { getClientConfig } from "@/app/config/client";
+import Locale from "../../locales";
+import { getServerSideConfig } from "@/app/config/server";
+import de from "@/app/locales/de";
+export class GeminiProApi implements LLMApi {
+  toolAgentChat(options: AgentChatOptions): Promise<void> {
+    throw new Error("Method not implemented.");
   }
-
   extractMessage(res: any) {
-    return res.choices?.at(0)?.message?.content ?? "";
-  }
+    console.log("[Response] gemini-pro response: ", res);
 
-  async chat(options: ChatOptions) {
-    const messages: any[] = [];
-    console.log(options.messages);
-    let systemPrompt = "";
-    for (const v of options.messages) {
-      if (v.role === "system") {
-        // systemPrompt = v.content;
-        continue;
+    return (
+      res?.candidates?.at(0)?.content?.parts.at(0)?.text ||
+      res?.error?.message ||
+      ""
+    );
+  }
+  async chat(options: ChatOptions): Promise<void> {
+    const apiClient = this;
+    const messages = options.messages.map((v) => ({
+      role: v.role.replace("assistant", "model").replace("system", "user"),
+      parts: [{ text: v.content }],
+    }));
+
+    // google requires that role in neighboring messages must not be the same
+    for (let i = 0; i < messages.length - 1; ) {
+      // Check if current and next item both have the role "model"
+      if (messages[i].role === messages[i + 1].role) {
+        // Concatenate the 'parts' of the current and next item
+        messages[i].parts = messages[i].parts.concat(messages[i + 1].parts);
+        // Remove the next item
+        messages.splice(i + 1, 1);
+      } else {
+        // Move to the next item
+        i++;
       }
-      let content = v.content;
-      if (systemPrompt !== "") {
-        content = `${systemPrompt}\n${content}`;
-        systemPrompt = "";
-      }
-      let message: {
-        role: string;
-        parts: { text: string }[];
-      } = {
-        role: v.role === "assistant" ? "model" : "user",
-        parts: [],
-      };
-      message.parts.push({
-        text: content,
-      });
-      messages.push(message);
     }
 
+    const modelConfig = {
+      ...useAppConfig.getState().modelConfig,
+      ...useChatStore.getState().currentSession().mask.modelConfig,
+      ...{
+        model: options.config.model,
+      },
+    };
     const requestPayload = {
       contents: messages,
       generationConfig: {
-        temperature: 1.0,
-        maxOutputTokens: 8000,
-        topP: 0.8,
-        topK: 10,
+        // stopSequences: [
+        //   "Title"
+        // ],
+        temperature: modelConfig.temperature,
+        maxOutputTokens: modelConfig.max_tokens,
+        topP: modelConfig.top_p,
+        // "topK": modelConfig.top_k,
       },
+      safetySettings: [
+        {
+          category: "HARM_CATEGORY_HARASSMENT",
+          threshold: "BLOCK_ONLY_HIGH",
+        },
+        {
+          category: "HARM_CATEGORY_HATE_SPEECH",
+          threshold: "BLOCK_ONLY_HIGH",
+        },
+        {
+          category: "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+          threshold: "BLOCK_ONLY_HIGH",
+        },
+        {
+          category: "HARM_CATEGORY_DANGEROUS_CONTENT",
+          threshold: "BLOCK_ONLY_HIGH",
+        },
+      ],
     };
 
-    console.log("[Request] gemini payload: ", requestPayload);
+    console.log("[Request] google payload: ", requestPayload);
 
-    const shouldStream = true;
+    const shouldStream = !!options.config.stream;
     const controller = new AbortController();
     options.onController?.(controller);
-
     try {
-      const chatPath = this.path(
-        GooglePath.ChatPath.replace("{{model}}", options.config.model),
-      );
+      const chatPath = this.path(Google.ChatPath);
       const chatPayload = {
         method: "POST",
         body: JSON.stringify(requestPayload),
         signal: controller.signal,
-        headers: getGeminiHeaders(),
+        headers: getHeaders(),
       };
 
       // make a fetch request
@@ -122,17 +113,26 @@ export class GeminiApi implements LLMApi {
         () => controller.abort(),
         REQUEST_TIMEOUT_MS,
       );
-
       if (shouldStream) {
         let responseText = "";
         let remainText = "";
+        let streamChatPath = chatPath.replace(
+          "generateContent",
+          "streamGenerateContent",
+        );
         let finished = false;
+
+        let existingTexts: string[] = [];
+        const finish = () => {
+          finished = true;
+          options.onFinish(existingTexts.join(""));
+        };
 
         // animate response to make it looks smooth
         function animateResponseText() {
           if (finished || controller.signal.aborted) {
             responseText += remainText;
-            console.log("[Response Animation] finished");
+            finish();
             return;
           }
 
@@ -149,94 +149,71 @@ export class GeminiApi implements LLMApi {
 
         // start animaion
         animateResponseText();
+        fetch(streamChatPath, chatPayload)
+          .then((response) => {
+            const reader = response?.body?.getReader();
+            const decoder = new TextDecoder();
+            let partialData = "";
 
-        const finish = () => {
-          if (!finished) {
-            finished = true;
-            options.onFinish(responseText + remainText);
-          }
-        };
+            return reader?.read().then(function processText({
+              done,
+              value,
+            }): Promise<any> {
+              if (done) {
+                console.log("Stream complete");
+                // options.onFinish(responseText + remainText);
+                finished = true;
+                return Promise.resolve();
+              }
 
-        controller.signal.onabort = finish;
-        fetchEventSource(chatPath, {
-          ...chatPayload,
-          async onopen(res) {
-            clearTimeout(requestTimeoutId);
-            const contentType = res.headers.get("content-type");
-            console.log(
-              "[Google] request response content type: ",
-              contentType,
-            );
+              partialData += decoder.decode(value, { stream: true });
 
-            if (contentType?.startsWith("text/plain")) {
-              responseText = await res.clone().text();
-              return finish();
-            }
-
-            if (
-              !res.ok ||
-              !res.headers
-                .get("content-type")
-                ?.startsWith(EventStreamContentType) ||
-              res.status !== 200
-            ) {
-              const responseTexts = [responseText];
-              let extraInfo = await res.clone().text();
               try {
-                const resJson = await res.clone().json();
-                extraInfo = prettyObject(resJson);
-              } catch {}
+                let data = JSON.parse(ensureProperEnding(partialData));
 
-              if (res.status === 401) {
-                responseTexts.push(Locale.Error.Unauthorized);
+                const textArray = data.reduce(
+                  (acc: string[], item: { candidates: any[] }) => {
+                    const texts = item.candidates.map((candidate) =>
+                      candidate.content.parts
+                        .map((part: { text: any }) => part.text)
+                        .join(""),
+                    );
+                    return acc.concat(texts);
+                  },
+                  [],
+                );
+
+                if (textArray.length > existingTexts.length) {
+                  const deltaArray = textArray.slice(existingTexts.length);
+                  existingTexts = textArray;
+                  remainText += deltaArray.join("");
+                }
+              } catch (error) {
+                // console.log("[Response Animation] error: ", error,partialData);
+                // skip error message when parsing json
               }
 
-              if (extraInfo) {
-                responseTexts.push(extraInfo);
-              }
-
-              responseText = responseTexts.join("\n\n");
-
-              return finish();
-            }
-          },
-          onmessage(msg) {
-            if (msg.data === "[DONE]" || finished) {
-              return finish();
-            }
-            const text = msg.data;
-            try {
-              const json = JSON.parse(text) as {
-                candidates: Array<{
-                  content: {
-                    parts: Array<{
-                      text: string;
-                    }>;
-                  };
-                }>;
-              };
-              const delta = json.candidates[0]?.content?.parts[0]?.text;
-              if (delta) {
-                remainText += delta;
-              }
-            } catch (e) {
-              console.error("[Request] parse error", text);
-            }
-          },
-          onclose() {
-            finish();
-          },
-          onerror(e) {
-            options.onError?.(e);
-            throw e;
-          },
-          openWhenHidden: true,
-        });
+              return reader.read().then(processText);
+            });
+          })
+          .catch((error) => {
+            console.error("Error:", error);
+          });
       } else {
         const res = await fetch(chatPath, chatPayload);
         clearTimeout(requestTimeoutId);
 
         const resJson = await res.json();
+
+        if (resJson?.promptFeedback?.blockReason) {
+          // being blocked
+          options.onError?.(
+            new Error(
+              "Message is being blocked for reason: " +
+                resJson.promptFeedback.blockReason,
+            ),
+          );
+        }
         const message = this.extractMessage(resJson);
         options.onFinish(message);
       }
@@ -245,249 +222,43 @@ export class GeminiApi implements LLMApi {
       options.onError?.(e as Error);
     }
   }
-
-  async toolAgentChat(options: AgentChatOptions) {
-    const messages = options.messages.map((v) => ({
-      role: v.role,
-      content: v.content,
-    }));
-
-    const modelConfig = {
-      ...useAppConfig.getState().modelConfig,
-      ...useChatStore.getState().currentSession().mask.modelConfig,
-      ...{
-        model: options.config.model,
-      },
-    };
-
-    const requestPayload = {
-      messages,
-      stream: options.config.stream,
-      model: modelConfig.model,
-      temperature: modelConfig.temperature,
-      presence_penalty: modelConfig.presence_penalty,
-      frequency_penalty: modelConfig.frequency_penalty,
-      top_p: modelConfig.top_p,
-      baseUrl: useAccessStore.getState().openaiUrl,
-      maxIterations: options.agentConfig.maxIterations,
-      returnIntermediateSteps: options.agentConfig.returnIntermediateSteps,
-      useTools: options.agentConfig.useTools,
-    };
-
-    console.log("[Request] openai payload: ", requestPayload);
-
-    const shouldStream = true;
-    const controller = new AbortController();
-    options.onController?.(controller);
-
-    try {
-      let path = "/api/langchain/tool/agent/";
-      const enableNodeJSPlugin = !!process.env.NEXT_PUBLIC_ENABLE_NODEJS_PLUGIN;
-      path = enableNodeJSPlugin ? path + "nodejs" : path + "edge";
-      const chatPayload = {
-        method: "POST",
-        body: JSON.stringify(requestPayload),
-        signal: controller.signal,
-        headers: getHeaders(),
-      };
-
-      // make a fetch request
-      const requestTimeoutId = setTimeout(
-        () => controller.abort(),
-        REQUEST_TIMEOUT_MS,
-      );
-      console.log("shouldStream", shouldStream);
-
-      if (shouldStream) {
-        let responseText = "";
-        let finished = false;
-
-        const finish = () => {
-          if (!finished) {
-            options.onFinish(responseText);
-            finished = true;
-          }
-        };
-
-        controller.signal.onabort = finish;
-
-        fetchEventSource(path, {
-          ...chatPayload,
-          async onopen(res) {
-            clearTimeout(requestTimeoutId);
-            const contentType = res.headers.get("content-type");
-            console.log(
-              "[OpenAI] request response content type: ",
-              contentType,
-            );
-
-            if (contentType?.startsWith("text/plain")) {
-              responseText = await res.clone().text();
-              return finish();
-            }
-
-            if (
-              !res.ok ||
-              !res.headers
-                .get("content-type")
-                ?.startsWith(EventStreamContentType) ||
-              res.status !== 200
-            ) {
-              const responseTexts = [responseText];
-              let extraInfo = await res.clone().text();
-              console.warn(`extraInfo: ${extraInfo}`);
-              // try {
-              //   const resJson = await res.clone().json();
-              //   extraInfo = prettyObject(resJson);
-              // } catch { }
-
-              if (res.status === 401) {
-                responseTexts.push(Locale.Error.Unauthorized);
-              }
-
-              if (extraInfo) {
-                responseTexts.push(extraInfo);
-              }
-
-              responseText = responseTexts.join("\n\n");
-
-              return finish();
-            }
-          },
-          onmessage(msg) {
-            let response = JSON.parse(msg.data);
-            if (!response.isSuccess) {
-              console.error("[Request]", msg.data);
-              responseText = msg.data;
-              throw Error(response.message);
-            }
-            if (msg.data === "[DONE]" || finished) {
-              return finish();
-            }
-            try {
-              if (response && !response.isToolMessage) {
-                responseText += response.message;
-                options.onUpdate?.(responseText, response.message);
-              } else {
-                options.onToolUpdate?.(response.toolName!, response.message);
-              }
-            } catch (e) {
-              console.error("[Request] parse error", response, msg);
-            }
-          },
-          onclose() {
-            finish();
-          },
-          onerror(e) {
-            options.onError?.(e);
-            throw e;
-          },
-          openWhenHidden: true,
-        });
-      } else {
-        const res = await fetch(path, chatPayload);
-        clearTimeout(requestTimeoutId);
-
-        const resJson = await res.json();
-        const message = this.extractMessage(resJson);
-        options.onFinish(message);
-      }
-    } catch (e) {
-      console.log("[Request] failed to make a chat reqeust", e);
-      options.onError?.(e as Error);
-    }
+  usage(): Promise<LLMUsage> {
+    throw new Error("Method not implemented.");
   }
-
-  async usage() {
-    const formatDate = (d: Date) =>
-      `${d.getFullYear()}-${(d.getMonth() + 1).toString().padStart(2, "0")}-${d
-        .getDate()
-        .toString()
-        .padStart(2, "0")}`;
-    const ONE_DAY = 1 * 24 * 60 * 60 * 1000;
-    const now = new Date();
-    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-    const startDate = formatDate(startOfMonth);
-    const endDate = formatDate(new Date(Date.now() + ONE_DAY));
-
-    const [used, subs] = await Promise.all([
-      fetch(
-        this.path(
-          `${OpenaiPath.UsagePath}?start_date=${startDate}&end_date=${endDate}`,
-        ),
-        {
-          method: "GET",
-          headers: getHeaders(),
-        },
-      ),
-      fetch(this.path(OpenaiPath.SubsPath), {
-        method: "GET",
-        headers: getHeaders(),
-      }),
-    ]);
-
-    if (used.status === 401) {
-      throw new Error(Locale.Error.Unauthorized);
-    }
-
-    if (!used.ok || !subs.ok) {
-      throw new Error("Failed to query usage from openai");
-    }
-
-    const response = (await used.json()) as {
-      total_usage?: number;
-      error?: {
-        type: string;
-        message: string;
-      };
-    };
-
-    const total = (await subs.json()) as {
-      hard_limit_usd?: number;
-    };
-
-    if (response.error && response.error.type) {
-      throw Error(response.error.message);
-    }
-
-    if (response.total_usage) {
-      response.total_usage = Math.round(response.total_usage) / 100;
-    }
-
-    if (total.hard_limit_usd) {
-      total.hard_limit_usd = Math.round(total.hard_limit_usd * 100) / 100;
-    }
-
-    return {
-      used: response.total_usage,
-      total: total.hard_limit_usd,
-    } as LLMUsage;
-  }
-
   async models(): Promise<LLMModel[]> {
-    if (this.disableListModels) {
-      return DEFAULT_MODELS.slice();
+    return [];
+  }
+  path(path: string): string {
+    const accessStore = useAccessStore.getState();
+    const isGoogle =
+      accessStore.useCustomConfig &&
+      accessStore.provider === ServiceProvider.Google;
+
+    if (isGoogle && !accessStore.isValidGoogle()) {
+      throw Error(
+        "incomplete google config, please check it in your settings page",
+      );
     }
 
-    const res = await fetch(this.path(OpenaiPath.ListModelPath), {
-      method: "GET",
-      headers: {
-        ...getHeaders(),
-      },
-    });
+    let baseUrl = isGoogle ? accessStore.googleBaseUrl : ApiPath.GoogleAI;
 
-    const resJson = (await res.json()) as OpenAIListModelResponse;
-    const chatModels = resJson.data?.filter((m) => m.id.startsWith("gpt-"));
-    console.log("[Models]", chatModels);
-
-    if (!chatModels) {
-      return [];
+    if (baseUrl.length === 0) {
+      baseUrl = ApiPath.GoogleAI;
+    }
+    if (baseUrl.endsWith("/")) {
+      baseUrl = baseUrl.slice(0, baseUrl.length - 1);
+    }
+    if (!baseUrl.startsWith("http") && !baseUrl.startsWith(ApiPath.GoogleAI)) {
+      baseUrl = "https://" + baseUrl;
     }
 
-    return chatModels.map((m) => ({
-      name: m.id,
-      available: true,
-    }));
+    return [baseUrl, path].join("/");
   }
 }
-export { OpenaiPath };
+
+function ensureProperEnding(str: string) {
+  if (str.startsWith("[") && !str.endsWith("]")) {
+    return str + "]";
+  }
+  return str;
+}
