@@ -1,4 +1,4 @@
-import { Tool } from "langchain/tools";
+import { Tool } from "@langchain/core/tools";
 import S3FileStorage from "../../utils/s3_file_storage";
 
 export class StableDiffusionWrapper extends Tool {
@@ -6,6 +6,13 @@ export class StableDiffusionWrapper extends Tool {
 
   constructor() {
     super();
+  }
+
+  async saveImage(imageBase64: string) {
+    const buffer = Buffer.from(imageBase64, "base64");
+    var fileName = `${Date.now()}.png`;
+    const filePath = await S3FileStorage.put(fileName, buffer);
+    return filePath;
   }
 
   /** @ignore */
@@ -40,8 +47,7 @@ export class StableDiffusionWrapper extends Tool {
     const json = await response.json();
     let imageBase64 = json.images[0];
     if (!imageBase64) return "No image was generated";
-    const buffer = Buffer.from(imageBase64, "base64");
-    const filePath = await S3FileStorage.put(`${Date.now()}.png`, buffer);
+    const filePath = await this.saveImage(imageBase64);
     console.log(`[${this.name}]`, filePath);
     return filePath;
   }

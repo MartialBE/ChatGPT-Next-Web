@@ -89,6 +89,8 @@ export const getServerSideConfig = () => {
     googleApiKey: process.env.GOOGLE_API_KEY,
     googleBaseUrl: process.env.GOOGLE_BASE_URL,
 
+    gtmId: process.env.GTM_ID,
+
     needCode: ACCESS_CODES.size > 0,
     code: process.env.CODE,
     codes: ACCESS_CODES,
@@ -101,5 +103,10 @@ export const getServerSideConfig = () => {
     hideBalanceQuery: !process.env.ENABLE_BALANCE_QUERY,
     disableFastLink: !!process.env.DISABLE_FAST_LINK,
     customModels,
+
+    isStoreFileToLocal:
+      !!process.env.NEXT_PUBLIC_ENABLE_NODEJS_PLUGIN &&
+      !process.env.R2_ACCOUNT_ID &&
+      !process.env.S3_ENDPOINT,
   };
 };
