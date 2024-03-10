@@ -13,12 +13,20 @@ export const ROLES = ["system", "user", "assistant"] as const;
 export type MessageRole = (typeof ROLES)[number];
 
 export const Models = ["gpt-3.5-turbo", "gpt-4"] as const;
+export const TTSModels = ["tts-1", "tts-1-hd"] as const;
 export type ChatModel = ModelType;
+
+export interface MultimodalContent {
+  type: "text" | "image_url";
+  text?: string;
+  image_url?: {
+    url: string;
+  };
+}
 
 export interface RequestMessage {
   role: MessageRole;
-  content: string;
-  image_url?: string;
+  content: string | MultimodalContent[];
 }
 
 export interface LLMConfig {
@@ -34,6 +42,15 @@ export interface LLMAgentConfig {
   maxIterations: number;
   returnIntermediateSteps: boolean;
   useTools?: (string | undefined)[];
+}
+
+export interface SpeechOptions {
+  model: string;
+  input: string;
+  voice: string;
+  response_format?: string;
+  speed?: number;
+  onController?: (controller: AbortController) => void;
 }
 
 export interface ChatOptions {
@@ -76,6 +93,7 @@ export interface LLMModelProvider {
 
 export abstract class LLMApi {
   abstract chat(options: ChatOptions): Promise<void>;
+  abstract speech(options: SpeechOptions): Promise<ArrayBuffer>;
   abstract toolAgentChat(options: AgentChatOptions): Promise<void>;
   abstract usage(): Promise<LLMUsage>;
   abstract models(): Promise<LLMModel[]>;
