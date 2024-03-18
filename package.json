@@ -4,6 +4,7 @@
   "license": "mit",
   "scripts": {
     "dev": "next dev",
+    "dev:https": "next dev --experimental-https",
     "build": "cross-env BUILD_MODE=standalone next build",
     "start": "next start",
     "lint": "next lint",
@@ -20,7 +21,6 @@
     "@aws-sdk/s3-request-presigner": "^3.414.0",
     "@fortaine/fetch-event-source": "^3.0.6",
     "@hello-pangea/dnd": "^16.5.0",
-    "langchain": "0.1.20",
     "@langchain/community": "0.0.30",
     "@langchain/openai": "0.0.14",
     "@next/third-parties": "^14.1.0",
@@ -37,6 +37,7 @@
     "html-to-image": "^1.11.11",
     "html-to-text": "^9.0.5",
     "https-proxy-agent": "^7.0.2",
+    "langchain": "0.1.20",
     "mermaid": "^10.6.1",
     "nanoid": "^5.0.3",
     "next": "^13.4.9",
@@ -80,5 +81,6 @@
     "lint-staged/yaml": "^2.2.2",
     "@langchain/core": "0.1.30",
     "openai": "4.28.4"
-  }
+  },
+  "packageManager": "yarn@1.22.19"
 }
