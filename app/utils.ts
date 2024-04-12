@@ -59,10 +59,7 @@ export async function downloadAs(text: string, filename: string) {
 
     if (result !== null) {
       try {
-        await window.__TAURI__.fs.writeTextFile(
-          result,
-          text
-        );
+        await window.__TAURI__.fs.writeTextFile(result, text);
         showToast(Locale.Download.Success);
       } catch (error) {
         showToast(Locale.Download.Failed);
@@ -294,9 +291,17 @@ export function getMessageImages(message: RequestMessage): string[] {
 }
 
 export function isVisionModel(model: string) {
+  const visionKeywords = ["vision", "claude-3"];
+  const isGpt4Turbo =
+    model.includes("gpt-4-turbo") && !model.includes("preview");
+
   return (
-    // model.startsWith("gpt-4-vision") ||
-    // model.startsWith("gemini-pro-vision") ||
-    model.includes("vision")
+    visionKeywords.some((keyword) => model.includes(keyword)) || isGpt4Turbo
+  );
+}
+
+export function isSupportRAGModel(modelName: string) {
+  return DEFAULT_MODELS.filter((model) => model.provider.id === "openai").some(
+    (model) => model.name === modelName,
   );
 }

@@ -1,7 +1,9 @@
-import { STTConfig } from "../store";
+import { STTConfig, STTConfigValidator } from "../store";
 
 import Locale from "../locales";
-import { ListItem } from "./ui-lib";
+import { ListItem, Select } from "./ui-lib";
+import { DEFAULT_STT_ENGINES } from "../constant";
+import { isFirefox } from "../utils";
 
 export function STTConfigList(props: {
   sttConfig: STTConfig;
@@ -23,6 +25,27 @@ export function STTConfigList(props: {
           }
         ></input>
       </ListItem>
+      {!isFirefox() && (
+        <ListItem title={Locale.Settings.STT.Engine.Title}>
+          <Select
+            value={props.sttConfig.engine}
+            onChange={(e) => {
+              props.updateConfig(
+                (config) =>
+                  (config.engine = STTConfigValidator.engine(
+                    e.currentTarget.value,
+                  )),
+              );
+            }}
+          >
+            {DEFAULT_STT_ENGINES.map((v, i) => (
+              <option value={v} key={i}>
+                {v}
+              </option>
+            ))}
+          </Select>
+        </ListItem>
+      )}
     </>
   );
 }
