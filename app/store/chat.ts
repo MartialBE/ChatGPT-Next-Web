@@ -1,4 +1,8 @@
-import { trimTopic, getMessageTextContent } from "../utils";
+import {
+  trimTopic,
+  getMessageTextContent,
+  isFunctionCallModel,
+} from "../utils";
 
 import Locale, { getLang } from "../locales";
 import { showToast } from "../components/ui-lib";
@@ -9,12 +13,18 @@ import {
   DEFAULT_MODELS,
   DEFAULT_SYSTEM_TEMPLATE,
   KnowledgeCutOffDate,
-  ModelProvider,
   StoreKey,
   SUMMARIZE_MODEL,
   GEMINI_SUMMARIZE_MODEL,
+  MYFILES_BROWSER_TOOLS_SYSTEM_PROMPT,
 } from "../constant";
-import { ClientApi, RequestMessage, MultimodalContent } from "../client/api";
+import { isDalle3, safeLocalStorage } from "../utils";
+import { getClientApi } from "../client/api";
+import type {
+  ClientApi,
+  RequestMessage,
+  MultimodalContent,
+} from "../client/api";
 import { ChatControllerPool } from "../client/controller";
 import { prettyObject } from "../utils/format";
 import { estimateTokenLength } from "../utils/token";
@@ -27,7 +37,22 @@ export interface ChatToolMessage {
 }
 import { createPersistStore } from "../utils/store";
 import { FileInfo } from "../client/platforms/utils";
-import { identifyDefaultClaudeModel } from "../utils/checkers";
+import { collectModelsWithDefaultModel } from "../utils/model";
+import { useAccessStore } from "./access";
+
+const localStorage = safeLocalStorage();
+
+export type ChatMessageTool = {
+  id: string;
+  index?: number;
+  type?: string;
+  function?: {
+    name: string;
+    arguments?: string;
+  };
+  content?: string;
+  isError?: boolean;
+};
 
 export type ChatMessage = RequestMessage & {
   date: string;
@@ -67,6 +92,8 @@ export interface ChatSession {
   clearContextIndex?: number;
 
   mask: Mask;
+
+  attachFiles: FileInfo[];
 }
 
 export const DEFAULT_TOPIC = Locale.Store.DefaultTopic;
@@ -90,21 +117,27 @@ function createEmptySession(): ChatSession {
     lastSummarizeIndex: 0,
 
     mask: createEmptyMask(),
+
+    attachFiles: [],
   };
 }
 
 function getSummarizeModel(currentModel: string) {
-  // if the current model does not exist in the default model
-  // example azure services cannot use SUMMARIZE_MODEL
-  const model = DEFAULT_MODELS.find((m) => m.name === currentModel);
-  console.log("model", model);
-  if (!model) return currentModel;
-  if (model.provider.providerType === "google") return GEMINI_SUMMARIZE_MODEL;
-  // if it is using gpt-* models, force to use 3.5 to summarize
+  // if it is using gpt-* models, force to use 4o-mini to summarize
   if (currentModel.startsWith("gpt")) {
-    return SUMMARIZE_MODEL;
+    const configStore = useAppConfig.getState();
+    const accessStore = useAccessStore.getState();
+    const allModel = collectModelsWithDefaultModel(
+      configStore.models,
+      [configStore.customModels, accessStore.customModels].join(","),
+      accessStore.defaultModel,
+    );
+    const summarizeModel = allModel.find(
+      (m) => m.name === SUMMARIZE_MODEL && m.available,
+    );
+    return summarizeModel?.name ?? currentModel;
   }
-  if (currentModel.startsWith("gemini-pro")) {
+  if (currentModel.startsWith("gemini")) {
     return GEMINI_SUMMARIZE_MODEL;
   }
   return currentModel;
@@ -135,7 +168,7 @@ function fillTemplateWith(input: string, modelConfig: ModelConfig) {
     ServiceProvider: serviceProvider,
     cutoff,
     model: modelConfig.model,
-    time: new Date().toLocaleString(),
+    time: new Date().toString(),
     lang: getLang(),
     input: input,
   };
@@ -325,7 +358,12 @@ export const useChatStore = createPersistStore(
         let mContent: string | MultimodalContent[] = userContent;
 
         if (attachImages && attachImages.length > 0) {
-          mContent = [];
+          mContent = [
+            {
+              type: "text",
+              text: userContent,
+            },
+          ];
           mContent = mContent.concat(
             attachImages.map((url) => {
               return {
@@ -336,12 +374,10 @@ export const useChatStore = createPersistStore(
               };
             }),
           );
-          mContent = mContent.concat([
-            {
-              type: "text",
-              text: userContent,
-            },
-          ]);
+        }
+        // add file link
+        if (attachFiles && attachFiles.length > 0) {
+          mContent += ` [${attachFiles[0].originalFilename}](${attachFiles[0].filePath})`;
         }
         let userMessage: ChatMessage = createMessage({
           role: "user",
@@ -354,7 +390,9 @@ export const useChatStore = createPersistStore(
           model: modelConfig.model,
           toolMessages: [],
         });
-
+        const api: ClientApi = getClientApi(modelConfig.providerName);
+        const isEnableRAG =
+          session.attachFiles && session.attachFiles.length > 0;
         // get recent messages
         const recentMessages = get().getMessagesWithMemory();
         const sendMessages = recentMessages.concat(userMessage);
@@ -380,19 +418,20 @@ export const useChatStore = createPersistStore(
           session.messages.push(savedUserMessage);
           session.messages.push(botMessage);
         });
-        const isEnableRAG = attachFiles && attachFiles?.length > 0;
-        var api: ClientApi;
-        api = new ClientApi(ModelProvider.GPT);
         if (
           config.pluginConfig.enable &&
           session.mask.usePlugins &&
           (allPlugins.length > 0 || isEnableRAG) &&
-          modelConfig.model.startsWith("gpt") &&
-          modelConfig.model != "gpt-4-vision-preview"
+          isFunctionCallModel(modelConfig.model)
         ) {
           console.log("[ToolAgent] start");
-          const pluginToolNames = allPlugins.map((m) => m.toolName);
-          if (isEnableRAG) pluginToolNames.push("rag-search");
+          let pluginToolNames = allPlugins.map((m) => m.toolName);
+          if (isEnableRAG) {
+            // other plugins will affect rag
+            // clear existing plugins here
+            pluginToolNames = [];
+            pluginToolNames.push("myfiles_browser");
+          }
           const agentCall = () => {
             api.llm.toolAgentChat({
               chatSessionId: session.id,
@@ -459,27 +498,8 @@ export const useChatStore = createPersistStore(
               },
             });
           };
-          if (attachFiles && attachFiles.length > 0) {
-            await api.llm
-              .createRAGStore({
-                chatSessionId: session.id,
-                fileInfos: attachFiles,
-              })
-              .then(() => {
-                console.log("[RAG]", "Vector db created");
-                agentCall();
-              });
-          } else {
-            agentCall();
-          }
+          agentCall();
         } else {
-          if (modelConfig.model.startsWith("gemini")) {
-            api = new ClientApi(ModelProvider.GeminiPro);
-          } else if (identifyDefaultClaudeModel(modelConfig.model)) {
-            api = new ClientApi(ModelProvider.Claude);
-          } else {
-            api = new ClientApi(ModelProvider.GPT);
-          }
           // make request
           api.llm.chat({
             messages: sendMessages,
@@ -537,14 +557,13 @@ export const useChatStore = createPersistStore(
       getMemoryPrompt() {
         const session = get().currentSession();
 
-        return {
-          role: "system",
-          content:
-            session.memoryPrompt.length > 0
-              ? Locale.Store.Prompt.History(session.memoryPrompt)
-              : "",
-          date: "",
-        } as ChatMessage;
+        if (session.memoryPrompt.length) {
+          return {
+            role: "system",
+            content: Locale.Store.Prompt.History(session.memoryPrompt),
+            date: "",
+          } as ChatMessage;
+        }
       },
 
       getMessagesWithMemory() {
@@ -563,13 +582,23 @@ export const useChatStore = createPersistStore(
           session.mask.modelConfig.model.startsWith("gpt-");
 
         var systemPrompts: ChatMessage[] = [];
+        var template = DEFAULT_SYSTEM_TEMPLATE;
+        if (session.attachFiles && session.attachFiles.length > 0) {
+          template += MYFILES_BROWSER_TOOLS_SYSTEM_PROMPT;
+          session.attachFiles.forEach((file) => {
+            template += `filename: \`${file.originalFilename}\`
+partialDocument: \`\`\`
+${file.partial}
+\`\`\``;
+          });
+        }
         systemPrompts = shouldInjectSystemPrompts
           ? [
               createMessage({
                 role: "system",
                 content: fillTemplateWith("", {
                   ...modelConfig,
-                  template: DEFAULT_SYSTEM_TEMPLATE,
+                  template: template,
                 }),
               }),
             ]
@@ -580,16 +609,15 @@ export const useChatStore = createPersistStore(
             systemPrompts.at(0)?.content ?? "empty",
           );
         }
-
+        const memoryPrompt = get().getMemoryPrompt();
         // long term memory
         const shouldSendLongTermMemory =
           modelConfig.sendMemory &&
           session.memoryPrompt &&
           session.memoryPrompt.length > 0 &&
           session.lastSummarizeIndex > clearContextIndex;
-        const longTermMemoryPrompts = shouldSendLongTermMemory
-          ? [get().getMemoryPrompt()]
-          : [];
+        const longTermMemoryPrompts =
+          shouldSendLongTermMemory && memoryPrompt ? [memoryPrompt] : [];
         const longTermMemoryStartIndex = session.lastSummarizeIndex;
 
         // short term memory
@@ -657,15 +685,12 @@ export const useChatStore = createPersistStore(
         const config = useAppConfig.getState();
         const session = get().currentSession();
         const modelConfig = session.mask.modelConfig;
-
-        var api: ClientApi;
-        if (modelConfig.model.startsWith("gemini")) {
-          api = new ClientApi(ModelProvider.GeminiPro);
-        } else if (identifyDefaultClaudeModel(modelConfig.model)) {
-          api = new ClientApi(ModelProvider.Claude);
-        } else {
-          api = new ClientApi(ModelProvider.GPT);
+        // skip summarize when using dalle3?
+        if (isDalle3(modelConfig.model)) {
+          return;
         }
+
+        const api: ClientApi = getClientApi(modelConfig.providerName);
 
         // remove error messages if any
         const messages = session.messages;
@@ -715,9 +740,11 @@ export const useChatStore = createPersistStore(
             Math.max(0, n - modelConfig.historyMessageCount),
           );
         }
-
-        // add memory prompt
-        toBeSummarizedMsgs.unshift(get().getMemoryPrompt());
+        const memoryPrompt = get().getMemoryPrompt();
+        if (memoryPrompt) {
+          // add memory prompt
+          toBeSummarizedMsgs.unshift(memoryPrompt);
+        }
 
         const lastSummarizeIndex = session.messages.length;
 
